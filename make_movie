@@ -1,0 +1,110 @@
+#!/usr/bin/python
+
+# Copyright(C) 2023, ATA Engineering, Inc.
+#
+# This program is free software you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program; if not, see
+# <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+import os
+import argparse
+import multiprocessing as mp
+import subprocess
+import itertools as it
+
+def extract(ii, args):
+  caseName = args.case
+  cmd = [args.mpi[0], "-" + args.mpi[1], "1", "extract", "-en"]
+  for bnd in args.boundary.split(","):
+    cmd.append("-bc")
+    cmd.append(bnd)
+  cmd.append(caseName)
+  cmd.append(str(ii))
+  for v in args.variables.split(","):
+    cmd.append(v)
+  subprocess.call(cmd)
+
+def main():
+  # set up command line parsing
+  parser = argparse.ArgumentParser(description="Make a movie from boundary and cut plane data")
+  # optional arguments
+  parser.add_argument("-c", "--case", default="undefined", required=True,
+                      help="CFD case name (Required)")
+  parser.add_argument("-s", "--start", type=int, default=0, metavar="ITER",
+                      help="First iteration to extract data at (Default=%(default)s)")
+  parser.add_argument("-e", "--end", type=int, default=1, metavar="ITER",
+                      help="Last iteration to extract data at (Default=%(default)s)")
+  parser.add_argument("-i", "--increment", type=int, default=1, metavar="INC",
+                      help="Increment to extract data at (Default=%(default)s)")
+  parser.add_argument("-t", "--timeStep", type=float, default=1.0, metavar="DT",
+                      help="Time step for CFD simulation (Default=%(default)s)")
+  parser.add_argument("-x", "--mpi", default=["mpirun", "np"], nargs=2,
+                      help="Command to launch MPI linked programs (Default=%(default)s)")
+  parser.add_argument("-b", "--boundary", default="undefined", metavar="BC",
+                          help="Comma separated list of CFD boundaries to extract data for (Default=%(default)s)")
+  parser.add_argument("-v", "--variables", default="", metavar="VARS",
+                          help="Comma separated list of variables to extract (Default=%(default)s)")
+  args = parser.parse_args()
+
+  # data extraction and processing is embarassingly parallel, so split work
+  # up with multiple processes
+  iterations = range(args.start, args.end + 1, args.increment)
+  with mp.Pool() as pool:
+    pool.starmap(extract, zip(iterations, it.repeat(args)))
+
+  var = args.variables.split(",")
+  case = args.case
+  form = "ensight"
+  output = "movie_surf"
+  os.makedirs(output, exist_ok=True)
+
+  var_types = {}
+  startNum = len(str(args.end)) * 10
+  for i in iterations:
+    folder = os.path.join(os.getcwd(), case + "_" + form + "." + str(i))
+    post = str(startNum + i - args.start)
+    dest = os.path.join(output, case + "_" + post + ".geo")
+    if not os.path.exists(dest):
+      os.symlink(os.path.join(folder, case + ".geo"), dest)
+    for v in var:
+      dest = os.path.join(output, v + post)
+      if not os.path.exists(dest):
+        os.symlink(os.path.join(folder, v), dest)
+
+  folder = os.path.join(os.getcwd(), case + "_" + form + "." + str(args.start))
+  with open(os.path.join(folder, case + ".case"), "r") as f:
+    for line in f:
+      if " per " in line and any([v in line for v in var]):
+        tokens = line.split(":")
+        var_types.update({tokens[1].split()[0].strip() : tokens[0]})
+      
+  asterisks = "".rjust(len(str(startNum)), "*")
+  with open(os.path.join(output, case + ".case"), "w") as f:
+    f.write("FORMAT\n")
+    f.write("type: ensight gold\n")
+    f.write("GEOMETRY\n")
+    f.write("model: {0}_{1}.geo\n".format(case,asterisks))
+    f.write("VARIABLE\n")
+    for v in var:
+      f.write("{0}: 1 {1} {2}\n".format(var_types[v], v, v + asterisks))
+    f.write("TIME\n")
+    f.write("time set: 1\n")
+    f.write("number of steps: {0}\n".format(len(iterations)))
+    f.write("filename start number: {0}\n".format(startNum))
+    f.write("filename increment: {0}\n".format(args.increment))
+    f.write("time values:\n")
+    for i in iterations:
+      f.write("{0:.6f}\n".format(args.timeStep * i))
+
+if __name__ == "__main__":
+  main()
